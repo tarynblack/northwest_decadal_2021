@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 import icetools.climate as clm
 import icetools.plotting.plotutils as plu
 import pandas as pd
+from scipy import optimize
+import xarray as xr
+import numpy as np
 
 
 def monthCycler(months, start):
@@ -43,13 +46,56 @@ def getMarker(name):
                'default': '.'}
 
 
-def subSurfaceTemperatureAnomaly(ax, depth, coordinate, ecco=None, ecco_dtype='ecco5', icesdk=None, dec_mean=False, spgrid=False, style='pub-jog'):
+def piecewise_linear(x, y0, k1, k2):
+    '''Piecewise linear function that breaks at x0=2003'''
+    x0 = 2003.
+    return np.piecewise(x, [x < x0], [lambda x: k1*x + y0 - k1*x0, lambda x: k2*x + y0 - k2*x0])
+
+
+def regional_correction(coordinate, wood_data, ecco_data):
+    '''Regional correction to get ECCO to match Wood et al (2021) data'''
+    # -- Get data for curve fit
+    years = np.array([1995., 2003., 2013.])
+    wood_total_mean = wood_data.loc['1992-2017'].mean()
+    wood = np.array([
+        wood_data.loc['1992-1997'].mean() - wood_total_mean, 
+        wood_data.loc['1998-2007'].mean() - wood_total_mean, 
+        wood_data.loc['2008-2017'].mean() - wood_total_mean])
+    mine_total_mean = ecco_data.sel(time=slice('1992-01-01', '2017-12-31')).mean().values
+    mine = np.array([
+        float(ecco_data.sel(time=slice('1992-01-01', '1997-12-31')).mean().values - mine_total_mean), 
+        float(ecco_data.sel(time=slice('1998-01-01', '2007-12-31')).mean().values - mine_total_mean), 
+        float(ecco_data.sel(time=slice('2008-01-01', '2017-12-31')).mean().values - mine_total_mean)])
+    diff = mine - wood
+    # -- fit curve to data (difference between my data and wood's)
+    p, e = optimize.curve_fit(piecewise_linear, years, diff)
+
+    return p
+
+
+def subSurfaceTemperatureAnomaly(ax, depth, idx, coordinate, ecco=None, ecco_dtype='ecco5', icesdk=None, wood_data=None, dec_mean=False, spgrid=False, style='pub-jog'):
     if ecco is not None:
-        ecco_depth_point = clm.selectPointData(ecco, dtype=ecco_dtype, depth=depth, coordinate=coordinate)
-        ecco_mean = ecco_depth_point.temperature.mean().values
-        ecco_anomaly = ecco_depth_point.temperature.values - ecco_mean
-        time = ecco.temperature.time.values
-        eag, = ax.plot(time, ecco_anomaly, marker=getMarker('ecco'), color=getColor('ecco'), alpha=0.7, label='ECCO annual mean')
+        # get ECCO data at point for bottom 60% of water column
+        ecco_deepwater = clm.selectPointData(data=ecco, dtype='ecco5', coordinate=coordinate)
+        ecco_depth = ecco_deepwater.sel(
+            DEPTH_T=slice(
+                ecco_deepwater.temperature.dropna(dim='DEPTH_T').DEPTH_T.max().values*0.4,ecco_deepwater.temperature.dropna(dim='DEPTH_T').DEPTH_T.max().values)
+            ).temperature.mean(dim='DEPTH_T')
+        # apply regional correction (piecewise linear fit)
+        p = regional_correction(coordinate, wood_data, ecco_depth)
+        # use regional correction to calculate corrected ECCO temperature anomaly
+        years = pd.to_datetime(ecco_depth.time).year.astype('float')
+        correction = piecewise_linear(years, *p)
+        ecco_depth_bias_corrected = ecco_depth - correction
+        ecco_mean = ecco_depth_bias_corrected.sel(
+            time=slice('1992-01-01', '2017-12-31')).mean().values
+        ecco_anomaly = ecco_depth_bias_corrected - ecco_mean
+        # determine mean and anomaly for entire time series
+        # ecco_mean = ecco_depth_bias_corrected.values.mean()
+        # ecco_anomaly = ecco_depth_bias_corrected.values - ecco_mean
+        time = ecco_depth_bias_corrected.time.values
+        eagc, = ax.plot(time, ecco_anomaly, marker=getMarker('ecco'), color=getColor('ecco'), alpha=0.7, label='ECCO annual mean (corrected)')
+        eagu, = ax.plot(time, ecco_depth - ecco_depth.mean(), marker=getMarker('ecco'), color='gray', linestyle='--', alpha=0.7, label='ECCO annual mean (uncorrected)')
         ax.annotate(text='ECCO mean={:.2f} $^oC$'.format(ecco_mean), xy=(0.05, 0.9), xycoords='axes fraction')
         # plu.designProperties(ax, [eag], style)
         if dec_mean is True:
@@ -59,19 +105,22 @@ def subSurfaceTemperatureAnomaly(ax, depth, coordinate, ecco=None, ecco_dtype='e
             decade_starts = pd.to_datetime(ecco_df_decade.index.values, format='%Y')
             decade_ends = pd.to_datetime(ecco_df_decade.index.values + 10, format='%Y')
             edg = ax.hlines(ecco_df_decade.anomaly.values, xmin=decade_starts, xmax=decade_ends, color=getColor('ecco'), linewidth=5, alpha=0.5, zorder=2, label='ECCO decadal mean')
-            # plu.designProperties(ax, [edg], style)
     else:
-        eag, = ax.plot(0,0, visible=False)
+        eagc, = ax.plot(0,0, visible=False)
+        eagu, = ax.plot(0,0, visible=False)
         edg, = ax.plot(0,0, visible=False)
         ecco_df_decade = []
     if icesdk is not None:
-        icesdk_depth_point = clm.selectPointData(icesdk, dtype='icesdk', depth=depth, depth_tolerance=25, coordinate=coordinate, coordinate_tolerance=0.51)
+        # icesdk_depth_point = clm.selectPointData(icesdk, dtype='icesdk', depth=depth, depth_tolerance=25, coordinate=coordinate, coordinate_tolerance=0.51)
+        icesdk_point = clm.selectPointData(icesdk, dtype='icesdk', coordinate=coordinate, coordinate_tolerance=0.51)
+        # icesdk_depth_point = icesdk_point.where(icesdk_point.depth > depth).dropna()
+        icesdk_depth_point = icesdk_point.where(
+            icesdk_point.depth > icesdk_point.depth.values.max()*0.4).dropna()
         icesdk_mean = clm.icesAnnualMean(icesdk_depth_point)
         icesdk_anomaly = icesdk_mean.avg.values - icesdk_mean.avg.mean()
         time = pd.to_datetime(icesdk_mean.index.values, format='%Y')
         iag, = ax.plot(time, icesdk_anomaly, marker=getMarker('icesdk'), color=getColor('icesdk'), alpha=0.7, label='ICES annual mean')
         ax.annotate(text='ICES mean={:.2f} $^oC$'.format(icesdk_mean.avg.mean()), xy=(0.05, 0.8), xycoords='axes fraction')
-        # plu.designProperties(ax, [iag], style)
         if dec_mean is True:
             ices_decadal_mean = clm.icesDecadalMean(icesdk_depth_point)
             ices_decadal_anomaly = ices_decadal_mean.avg.values - ices_decadal_mean.avg.mean()
@@ -79,7 +128,6 @@ def subSurfaceTemperatureAnomaly(ax, depth, coordinate, ecco=None, ecco_dtype='e
             decade_ends = pd.to_datetime(ices_decadal_mean.index+10, format='%Y')
             ices_df_decade = pd.DataFrame(data={'decade': decade_starts, 'anomaly': ices_decadal_anomaly})
             idg = ax.hlines(ices_decadal_anomaly, xmin=decade_starts, xmax=decade_ends, color=getColor('icesdk'), linewidth=5, alpha=0.5, zorder=2, label='ICES decadal mean')
-            # plu.designProperties(ax, [idg], style)
     else:
         iag, = ax.plot(0,0, visible=False)
         idg, = ax.plot(0,0, visible=False)
@@ -92,8 +140,7 @@ def subSurfaceTemperatureAnomaly(ax, depth, coordinate, ecco=None, ecco_dtype='e
         ax.set_xlabel('Time')
         ax.set_ylabel('Temperature anomaly ($^oC$)')
         ax.set_title('Ocean Temperature Anomaly at {}m ({} N, {} W)'.format(depth, coordinate[0], -coordinate[1]))
-    # plu.designProperties(ax, [], style)
-    return eag, edg, iag, idg, ecco_df_decade, ices_df_decade
+    return eagc, eagu, edg, iag, idg, ecco_df_decade, ices_df_decade
 
 
 def seaSurfaceTemperatureAnomaly(ax, coordinate, ecco=None, ecco_dtype='ecco5', hadley=None, dec_mean=False, spgrid=False, style='pub-jog'):
