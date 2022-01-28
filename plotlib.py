@@ -6,8 +6,8 @@ sys.path.append('/mnt/e/')
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import pandas as pd
-import icetools.metrics as met
-import icetools.plotting.plotutils as plu
+import metrics as met
+import plotutils as plu
 import pwlf
 import random
 import numpy as np
@@ -332,14 +332,15 @@ def breakPointsHist(ax, glaciers, attr, time_bins, n_segs=3, startdate=None, end
     all_breaks = []
     for g in glaciers:
         glacier = glaciers[g]
-        breaks, _ = met.getBreakPoints(glacier, attr, n_segs, startdate, enddate)
-        all_breaks.extend(pd.to_datetime(breaks, format='%Y'))
+        f, p = met.f_test(glacier, attr, n_segs, startdate, enddate)
+        if p < 0.05:
+            breaks, _ = met.getBreakPoints(glacier, attr, n_segs, startdate, enddate)
+            all_breaks.extend(pd.to_datetime(breaks, format='%Y'))
     _, scaled_dates = glacier.normChange(attr, startdate, enddate)
-    graph = ax.hist(all_breaks, bins=time_bins, align='mid', rwidth=0.8, color=getColor('default'))
+    ax.hist(all_breaks, bins=time_bins, align='mid', rwidth=0.8, color=getColor('default'))
     ax.set_title('{} break points'.format(attr_names[attr]))
     ax.set_xlabel(pickTimeLabel(glacier, attr))
     ax.set_ylabel('Count')
     xleft = pd.to_datetime(scaled_dates.iloc[0].year-1, format='%Y')
     xright = pd.to_datetime(scaled_dates.iloc[-1].year+1, format='%Y')
     ax.set_xlim(left=xleft, right=xright)
-    # plu.designProperties(ax, graph, style)

@@ -8,6 +8,7 @@ import ruptures as rpt
 import pwlf
 import numpy as np
 from GPyOpt.methods import BayesianOptimization
+import scipy.stats
 
 def addDecade(start_date):
     start_date = pd.to_datetime(start_date).date()
@@ -192,6 +193,17 @@ def normChangeStats(glaciers, attr, startdate=None, enddate=None):
     return norm_mean, norm_std
 
 
+def getLinearFit(glacier, attr, startdate=None, enddate=None):
+    attrs, dates = glacier.filterDates(attr, startdate, enddate)
+    attrs = attrs[~np.isnan(attrs)]
+    dates = attrs.index.values
+    attrs = [a for item in attrs.values for a in item]
+    # Calculate linear regression using scipy.stats
+    slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(dates, attrs)
+    r_sq = r_value**2
+    return slope, intercept, r_sq, p_value, std_err
+
+
 def getBreakPoints(glacier, attr, n_segs=3, startdate=None, enddate=None):
     attrs, dates = glacier.filterDates(attr, startdate, enddate)
     attrs = attrs[~np.isnan(attrs)]
@@ -205,39 +217,30 @@ def getBreakPoints(glacier, attr, n_segs=3, startdate=None, enddate=None):
     return breaks, pwlf_fun
 
 
-def fitBreakPoints(glacier, attr, startdate=None, enddate=None):
-    """Find best number of line segments. Code from jekel.me/piecewise_linear_fit_py/examples.html."""
-    attrs, dates = glacier.filterDates(attr, startdate, enddate)
-    attrs = attrs[~np.isnan(attrs)]
-    dates = attrs.index.values
-    attrs = [a for item in attrs.values for a in item]
-    pwlf_fun = pwlf.PiecewiseLinFit(dates, attrs)
-
-    def my_obj(dates):
-        # define some penalty parameter l. You'll have to arbitrarily pick this, it depends upon the noise in your data, and the value of your sum of square of residuals.
-        l = np.mean(attrs)*0.1
-        f = np.zeros(dates.shape[0])
-        for i, j in enumerate(dates):
-            pwlf_fun.fit(j[0])
-            f[i] = pwlf_fun.ssr + (l*j[0])
-        return f
-    
-    # define lower and upper bound for number of line segments
-    bounds = [{'name': 'var_1', 'type': 'discrete', 'domain': np.arange(2, len(attrs)/5)}]
-    np.random.seed(12121)
-    myBopt = BayesianOptimization(my_obj, domain=bounds, model_type='GP', 
-                                  initial_design_numdata=10, 
-                                  initial_design_type='latin', 
-                                  exact_feval=True, verbosity=True, verbosity_model=False)
-    max_iter = 10
-    # perform the Bayesian optimization to find the optimum number of line segments
-    myBopt.run_optimization(max_iter=max_iter, verbosity=True)
-    # perform the fit for the optimum
-    breaks = pwlf_fun.fit(myBopt.x_opt)
-    breaks = [y for y in breaks if y != dates[0]]
-    breaks = [y for y in breaks if y != dates[-1]]
-    breaks = [round(y) for y in breaks]
-    return breaks, pwlf_fun
+def f_test(glacier, attr, n_segs=3, startdate=None, enddate=None):
+    # Get piecewise fit
+    breaks, pwlf_fun = getBreakPoints(glacier, attr, n_segs, startdate, enddate)
+    # Get linear fit
+    slope, intercept, r_sq, p_value, std_err = getLinearFit(glacier, attr, startdate, enddate)
+    # Get dates for x
+    attrs, _ = glacier.filterDates(attr, startdate, enddate)
+    dates = attrs[~np.isnan(attrs)].index.values
+    # Get predicted y values for linear regression
+    lin_y = (slope*dates) + intercept
+    # Get predicted y values for piecewise regression
+    pw_y = pwlf_fun.predict(dates)
+    # Get sum of squares error for full (piecewise) and reduced (linear) regressions
+    sse_f = np.sum((pw_y - attrs.areas.values) ** 2)
+    sse_r = np.sum((lin_y - attrs.areas.values) ** 2)
+    # Get degrees of freedom for reduced and full regressions
+    dfr = len(dates) - 2
+    dff = len(dates) - (n_segs+1)
+    # Compute f-statistic
+    f = ((sse_r - sse_f)/(dfr - dff)) / (sse_f/dff)
+    # Compute p-value
+    p = 1 - scipy.stats.f.cdf(f, (dfr-dff), dff)
+    # Return f and p values
+    return f, p
 
 
 def avgAnnualChangeRate(glacier, attr, time_bins, n_segs=3, startdate=None, enddate=None):
